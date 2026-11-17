@@ -5,7 +5,8 @@ const PORT=Number(process.env.PORT)||3000,root=__dirname,dbFile=process.env.DATA
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.png':'image/png','.svg':'image/svg+xml','.ico':'image/x-icon'};
 const server=http.createServer((req,res)=>{
  let pathname;try{pathname=decodeURIComponent(new URL(req.url,'http://localhost').pathname);}catch{res.writeHead(400);res.end('Bad request');return;}
- if(pathname==='/healthz'){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({ok:true,rooms:rooms.size}));return;}
+ if(pathname==='/healthz'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify({ok:true,rooms:rooms.size}));return;}
+ if(pathname==='/api/message' && req.method==='POST'){handleApi(req,res);return;}
  const filename=pathname==='/'?'index.html':pathname.replace(/^\/+/,''),file=path.resolve(root,filename);
  const publicFiles=new Set(['index.html','style.css','app.js','engine.js']);
  if(!publicFiles.has(filename)||(file!==root&&!file.startsWith(root+path.sep))||!fs.existsSync(file)||!fs.statSync(file).isFile()){ 
@@ -19,7 +20,63 @@ let saveTimer=null;function persist(){clearTimeout(saveTimer);saveTimer=setTimeo
 const wss=new WebSocketServer({server});
 const send=(ws,data)=>{if(ws?.readyState===1)ws.send(JSON.stringify(data));};
 const pickRoom=()=>{let id;do{id=String(10000+crypto.randomInt(90000));}while(rooms.has(id));return id;};
-function broadcast(room){room.updated=Date.now();const obj={code:room.code,host:room.host,mode:room.mode,players:room.players.map(p=>({id:p.id,name:p.name,avatar:p.avatar,bot:p.bot,connected:!!p.bot||room.sockets.get(p.id)?.readyState===1})),game:room.game};for(const ws of room.sockets.values())send(ws,{type:'ROOM',room:obj});persist();}
+function roomSnapshot(room){return {code:room.code,host:room.host,mode:room.mode,players:room.players.map(p=>({id:p.id,name:p.name,avatar:p.avatar,bot:p.bot,connected:!!p.bot||room.sockets.get(p.id)?.readyState===1||Boolean(p.lastSeen&&Date.now()-p.lastSeen<12000)})),game:room.game};}
+function broadcast(room){room.updated=Date.now();const obj=roomSnapshot(room);for(const ws of room.sockets.values())send(ws,{type:'ROOM',room:obj});persist();}
+// HTTPS fallback for mobile browsers or networks that block WebSocket upgrades.
+function handleApi(req,res){
+ let raw='',finished=false;
+ const respond=(messages)=>{if(finished)return;finished=true;res.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify({messages}));};
+ req.on('data',chunk=>{raw+=chunk.toString();if(raw.length>65536){finished=true;res.writeHead(413);res.end();req.destroy();}});
+ req.on('end',()=>{
+  if(finished)return;
+  try{
+   const msg=JSON.parse(raw),type=String(msg.type||'');let room;
+   const findAuth=()=>{const s=msg._session||{},r=rooms.get(String(s.code||'')),p=r?.players.find(p=>p.id===s.id&&p.token&&p.token===s.token);if(!r||!p)throw Error('Сессия комнаты не найдена. Создай новую комнату или войди по коду.');p.lastSeen=Date.now();r.updated=Date.now();return {r,p};};
+   if(type==='CREATE'){
+    const code=pickRoom(),id=crypto.randomUUID(),token=crypto.randomBytes(32).toString('hex');
+    room={code,host:id,mode:E.MODES[msg.mode]?msg.mode:'classic',players:[{id,name:String(msg.name||'Игрок').trim().slice(0,20),avatar:'🌙',token,lastSeen:Date.now()}],game:null,sockets:new Map(),botBusy:false,updated:Date.now()};
+    rooms.set(code,room);broadcast(room);return respond([{type:'IDENTITY',id,code,token},{type:'ROOM',room:roomSnapshot(room)}]);
+   }
+   if(type==='JOIN'){
+    room=rooms.get(String(msg.code||'').trim());if(!room)throw Error('Комната не найдена');if(room.game)throw Error('Партия уже началась');if(room.players.length>=E.MODES[room.mode].max)throw Error('Мест больше нет');
+    const id=crypto.randomUUID(),token=crypto.randomBytes(32).toString('hex');
+    room.players.push({id,token,name:String(msg.name||'Игрок').trim().slice(0,20),avatar:avatars[room.players.length%avatars.length],lastSeen:Date.now()});broadcast(room);
+    return respond([{type:'IDENTITY',id,code:room.code,token},{type:'ROOM',room:roomSnapshot(room)}]);
+   }
+   if(type==='RESUME'||type==='POLL'){
+    let auth;try{auth=findAuth();}catch(e){return respond([{type:'INVALID_SESSION'}]);}
+    room=auth.r;
+    return respond(type==='RESUME'?[{type:'IDENTITY',id:auth.p.id,code:room.code,token:auth.p.token},{type:'ROOM',room:roomSnapshot(room)}]:[{type:'ROOM',room:roomSnapshot(room)}]);
+   }
+   if(type==='START'){
+    const {r,p}=findAuth();room=r;
+    if(p.id!==room.host)throw Error('Только создатель начинает игру');if(room.game)throw Error('Партия уже идёт');
+    const rules=E.MODES[room.mode],humans=room.players.length,available=rules.max-humans,botCount=Number(msg.botCount??0);
+    if(!Number.isInteger(botCount)||botCount<0||botCount>available)throw Error(`Можно добавить от 0 до ${available} ботов`);
+    if(humans+botCount<rules.min)throw Error(`Нужно минимум ${rules.min} участников`);
+    const players=room.players.map(({token,lastSeen,...p})=>p);
+    for(let j=0;j<botCount;j++){const i=players.length;players.push({id:'bot-'+j+'-'+room.code,name:['Алина','Даня','Саша','Мира'][j%4],avatar:avatars[i%avatars.length],bot:true});}
+    room.players.push(...players.filter(p=>p.bot));room.game=E.create(players,room.mode);broadcast(room);runBots(room);
+    return respond([{type:'ROOM',room:roomSnapshot(room)}]);
+   }
+   if(type==='ACT'){
+    const {r,p}=findAuth();room=r;if(!room.game)throw Error('Партия ещё не началась');
+    const action=String(msg.action||'');if(!/^[A-Z_]{2,25}$/.test(action))throw Error('Неверное действие');
+    E.act(room.game,p.id,action,msg.args&&typeof msg.args==='object'?msg.args:{});broadcast(room);runBots(room);
+    return respond([{type:'ROOM',room:roomSnapshot(room)}]);
+   }
+   if(type==='LEAVE'){
+    const {r,p}=findAuth();room=r;
+    if(room.game){p.lastSeen=0;broadcast(room);return respond([]);}
+    room.players=room.players.filter(x=>x.id!==p.id);
+    if(!room.players.length){rooms.delete(room.code);persist();}else{if(room.host===p.id)room.host=room.players[0].id;broadcast(room);}
+    return respond([]);
+   }
+   throw Error('Неизвестная команда');
+  }catch(e){respond([{type:'ERROR',message:e.message||'Ошибка сервера'}]);}
+ });
+ req.on('error',()=>{if(!finished){finished=true;res.destroy();}});
+}
 function runBots(room){if(!room?.game||room.botBusy||!E.current(room.game).bot)return;room.botBusy=true;let count=0;const run=()=>{
  if(!room.game||room.game.finished||!E.current(room.game).bot||count++>=20){room.botBusy=false;return;}
  try{E.botTurn(room.game);broadcast(room);}catch(e){console.error('Bot error',e);room.botBusy=false;return;}

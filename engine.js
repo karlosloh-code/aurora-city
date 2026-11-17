@@ -3,9 +3,9 @@
 const MODES={
  classic:{label:'Обычная',icon:'🎩',detail:'2 кубика · свободные улицы · классическая партия',min:2,max:5,cash:15000,salary:2000,three:false},
  fast:{label:'Быстрая игра',icon:'⚡',detail:'3-й особый кубик · быстрый старт · больше событий',min:2,max:5,cash:17500,salary:2000,three:true},
- retro:{label:'Ретро',icon:'📼',detail:'2 кубика · старт 12 000k · старые темпы игры',min:2,max:5,cash:12000,salary:1500,three:false},
- layout:{label:'Расклад',icon:'🃏',detail:'3 игрока · улицы розданы в начале · особый кубик',min:3,max:3,cash:25000,salary:2000,three:true},
- shuffle:{label:'Перестановка 3',icon:'🔀',detail:'3 игрока · случайный порядок клеток · особый кубик',min:3,max:3,cash:17500,salary:2000,three:true}
+ retro:{label:'Ретро',icon:'📼',detail:'2 кубика · старт 15 000k · старые темпы игры',min:2,max:5,cash:15000,salary:1500,three:false},
+ layout:{label:'Расклад',icon:'🃏',detail:'3 игрока · каждому случайный бюджет · улицы розданы',min:3,max:3,cash:15000,salary:2000,three:true},
+ shuffle:{label:'Перестановка 3',icon:'🔀',detail:'3 игрока · старт 25 000k · случайный порядок клеток',min:3,max:3,cash:25000,salary:2000,three:true}
 };
 const defs=[
 ['Старт',0,'start','🚀'],['Шанс',0,'chance','❔'],['American Airlines',2200,'air','✈️'],['Банковская премия',0,'bonus','💵'],['Taxi Max',2600,'transport','🚕'],['Шанс',0,'chance','❔'],['Chanel',600,'fashion','✿'],['Hugo Boss',600,'fashion','♛'],['Lufthansa',2200,'air','🛫'],['Шанс',0,'chance','❔'],['Сладкий приз',0,'bonus','🍩'],
@@ -27,11 +27,12 @@ function create(people,mode='classic'){
   const positions=tiles.filter(t=>![0,10,20,30].includes(t.id)).map(t=>t.id);
   const pool=shuffle(positions.map(i=>tiles[i]));positions.forEach((id,i)=>{tiles[id]={...pool[i],id};});
  }
- const players=people.map((o,i)=>({id:String(o.id),name:String(o.name||'Игрок '+(i+1)).replace(/[<>]/g,'').slice(0,22),avatar:['🌙','🦊','🐼','🌸','🐱'][i],color:['#ce9dff','#6de5dd','#ffbe89','#f79dce','#ffe078'][i],bot:!!o.bot,cash:rule.cash,pos:0,cases:1,inventory:[],loans:[],bankrupt:false,turns:0}));
+ const layoutBudgets=mode==='layout'?shuffle(Array.from({length:21},(_,i)=>15000+i*500)).slice(0,people.length):null;
+ const players=people.map((o,i)=>({id:String(o.id),name:String(o.name||'Игрок '+(i+1)).replace(/[<>]/g,'').slice(0,22),avatar:['🌙','🦊','🐼','🌸','🐱'][i],color:['#ce9dff','#6de5dd','#ffbe89','#f79dce','#ffe078'][i],bot:!!o.bot,cash:layoutBudgets?layoutBudgets[i]:rule.cash,pos:0,cases:1,inventory:[],loans:[],bankrupt:false,turns:0}));
  const g={mode,tiles,players,active:0,phase:'roll',turn:1,seq:0,events:[],lastRoll:null,pendingRoll:null,offer:null,finished:false};
  if(mode==='layout'){
   const pool=shuffle(tiles.filter(t=>t.price>0));pool.forEach((t,i)=>{t.ownerId=players[(i%6<3)?i%3:2-i%3].id;});
-  log(g,'layout','Все улицы распределены между тремя игроками');
+  log(g,'layout','Все улицы распределены между тремя игроками; стартовый бюджет каждого определён случайно');
  }
  if(mode==='shuffle')log(g,'shuffle','Клетки поля переставлены случайным образом');
  log(g,'start',`Партия «${rule.label}» началась`);

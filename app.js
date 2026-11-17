@@ -1,7 +1,7 @@
 (function(){
 'use strict';
 const E=window.AuroraEngine,$=s=>document.querySelector(s),app=$('#app'),fx=$('#fx-layer');
-const state={view:'home',name:'',mode:'classic',botCount:2,roomBots:null,game:null,meId:'me',room:null,ws:null,connected:false,online:false,modal:null,tile:0,selectedBuff:null,tradeTo:'',tradeGive:'',tradeGet:'',tradeCash:0,animating:false,caseAnimation:false,sound:false,vibration:true,reduced:false,lastSeq:0};
+const state={view:'home',name:'',mode:'classic',botCount:2,roomBots:null,game:null,meId:'me',room:null,ws:null,connected:false,transport:'none',online:false,modal:null,tile:0,selectedBuff:null,tradeTo:'',tradeGive:'',tradeGet:'',tradeCash:0,animating:false,caseAnimation:false,sound:false,vibration:true,reduced:false,lastSeq:0};
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const h=(str)=>esc(str);const C=n=>E.coins(n);const mine=()=>state.game?.players.find(p=>p.id===state.meId);const turn=()=>state.game&&E.current(state.game);const isMyTurn=()=>turn()?.id===state.meId;const onboard=()=>state.online&&state.room;
 const mem=(key,value)=>{try{if(value===undefined)return localStorage.getItem(key);localStorage.setItem(key,value);}catch{return null;}};
@@ -97,28 +97,62 @@ function localStart(){const name=readName(),mode=E.MODES[state.mode],n=mode.min=
 function apply(action,args={}){if(state.animating)return;if(state.online){if(!state.connected){toast('Нет соединения с сервером');return;}send({type:'ACT',action,args});return;}try{E.act(state.game,state.meId,action,args);setGame(state.game);if(['END','SKIP','BUY'].includes(action))scheduleBots();}catch(e){toast(e.message);}}
 let botTimer=0;
 function scheduleBots(){clearTimeout(botTimer);if(!state.game||state.online)return;if(turn().bot){botTimer=setTimeout(()=>{if(!state.game||!turn().bot||state.game.finished)return;E.botTurn(state.game);setGame(state.game);if(turn().bot)scheduleBots();},state.animating?2100:950);}}
-function send(data){if(!state.ws||state.ws.readyState!==1){toast('Сетевая игра доступна после запуска сервера');return false;}state.ws.send(JSON.stringify(data));return true;}
-let reconnectTimer=0;
+function receiveNetwork(msg){
+ if(msg.type==='ERROR'){toast(msg.message);return;}
+ if(msg.type==='INVALID_SESSION'){mem('aurora_online','');state.online=false;state.room=null;state.meId='me';state.view='home';state.game=null;render();return;}
+ if(msg.type==='IDENTITY'){state.meId=msg.id;state.online=true;mem('aurora_online',JSON.stringify({code:msg.code,id:msg.id,token:msg.token}));}
+ if(msg.type==='ROOM'){
+  // Polling must not redraw the screen when nothing has changed.
+  if(state.room&&JSON.stringify(state.room)===JSON.stringify(msg.room))return;
+  state.room=msg.room;state.online=true;
+  if(msg.room.game){const first=!state.game||state.view!=='game';setGame(msg.room.game,{first});}
+  else{state.game=null;state.view='lobby';render();}
+ }
+}
+async function sendHttp(data){
+ try{
+  const saved=JSON.parse(mem('aurora_online')||'null');
+  const r=await fetch('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,_session:saved}),cache:'no-store'});
+  if(!r.ok)throw Error('HTTP '+r.status);
+  const output=await r.json();for(const msg of output.messages||[])receiveNetwork(msg);
+  return true;
+ }catch(e){toast('Ошибка подключения: '+e.message);return false;}
+}
+function send(data){
+ if(state.transport==='ws'&&state.ws?.readyState===1){state.ws.send(JSON.stringify(data));return true;}
+ if(state.transport==='http'&&state.connected){sendHttp(data);return true;}
+ toast('Подключаемся к серверу. Попробуй ещё раз.');return false;
+}
+let reconnectTimer=0,startedHttp=false;
+async function initHttp(){
+ if(state.transport==='ws'||location.protocol==='file:')return;
+ try{
+  const r=await fetch('/healthz',{cache:'no-store',signal:AbortSignal.timeout(12000)});
+  if(!r.ok)throw Error('Сервер временно недоступен');
+  if(state.transport==='ws')return;
+  state.connected=true;state.transport='http';
+  if(!startedHttp){startedHttp=true;setInterval(()=>{if(state.transport==='http'&&state.online&&mem('aurora_online'))sendHttp({type:'POLL'});},1400);}
+  const saved=mem('aurora_online');if(saved){try{const o=JSON.parse(saved);if(!pendingRoom||pendingRoom===o.code)sendHttp({type:'RESUME'});}catch{}}
+ }catch(e){if(state.transport!=='ws')state.connected=false;setTimeout(initHttp,6000);}
+}
 function connect(){
  if(location.protocol==='file:')return;
  if(state.ws&&(state.ws.readyState===0||state.ws.readyState===1))return;
  const protocol=location.protocol==='https:'?'wss:':'ws:';
  try{
   const ws=new WebSocket(protocol+'//'+location.host);state.ws=ws;
+  let connectionTimer=setTimeout(()=>{if(ws.readyState!==1)initHttp();},2500);
   ws.onopen=()=>{
-   state.connected=true;clearTimeout(reconnectTimer);
+   clearTimeout(connectionTimer);state.connected=true;state.transport='ws';clearTimeout(reconnectTimer);
    const saved=mem('aurora_online');if(saved){try{const o=JSON.parse(saved);if(!pendingRoom||pendingRoom===o.code)send({type:'RESUME',code:o.code,id:o.id,token:o.token});}catch{}}
   };
-  ws.onclose=()=>{if(state.ws!==ws)return;state.connected=false;if(state.online)toast('Соединение пропало — переподключаемся');reconnectTimer=setTimeout(connect,1600);};
-  ws.onerror=()=>{};
-  ws.onmessage=e=>{
-   let msg;try{msg=JSON.parse(e.data);}catch{return;}
-   if(msg.type==='ERROR'){toast(msg.message);return;}
-   if(msg.type==='INVALID_SESSION'){mem('aurora_online','');state.online=false;state.room=null;state.meId='me';state.view='home';state.game=null;render();return;}
-   if(msg.type==='IDENTITY'){state.meId=msg.id;state.online=true;mem('aurora_online',JSON.stringify({code:msg.code,id:msg.id,token:msg.token}));}
-   if(msg.type==='ROOM'){state.room=msg.room;state.online=true;if(msg.room.game){const first=!state.game||state.view!=='game';setGame(msg.room.game,{first});}else{state.game=null;state.view='lobby';render();}}
+  ws.onclose=()=>{clearTimeout(connectionTimer);if(state.ws!==ws)return;
+   if(state.transport==='ws'){state.connected=false;state.transport='none';}
+   initHttp();reconnectTimer=setTimeout(connect,8000);
   };
- }catch{}
+  ws.onerror=()=>{};
+  ws.onmessage=e=>{let msg;try{msg=JSON.parse(e.data);}catch{return;}receiveNetwork(msg);};
+ }catch{initHttp();}
 }
 function leaveToHome(){if(state.online){send({type:'LEAVE'});mem('aurora_online','');state.online=false;state.room=null;state.roomBots=null;state.meId='me';if(state.ws&&state.ws.readyState===1){state.ws.close();setTimeout(connect,300);}}state.game=null;state.view='home';state.modal=null;state.lastSeq=0;render();}
 async function copyInvite(){const url=location.origin+location.pathname+'?room='+state.room.code;try{await navigator.clipboard.writeText(url);toast('Ссылка скопирована!');}catch{prompt('Скопируй приглашение:',url);}}
@@ -129,7 +163,7 @@ app.addEventListener('click',e=>{
  if(a==='start-local'){localStart();return;}
  if(a==='continue'){try{const o=JSON.parse(mem('aurora_local'));state.online=false;state.room=null;state.meId=o.meId;state.lastSeq=0;setGame(o.game,{first:true});}catch{toast('Не удалось открыть сохранение');}return;}
  if(a==='create-room'||a==='join-room'){
-  const name=readName();if(!state.connected){toast('Для игры с друзьями запусти проект на сервере (см. README)');return;}if(a==='create-room'){state.roomBots=null;send({type:'CREATE',mode:state.mode,name});}else{const code=($('#roomCode')?.value||pendingRoom||'').trim();if(!/^\d{5}$/.test(code)){toast('Введи код из 5 цифр');return;}send({type:'JOIN',code,name});}return;
+  const name=readName();if(!state.connected){initHttp();toast('Подключаемся к игровому серверу — попробуй ещё раз');return;}if(a==='create-room'){state.roomBots=null;send({type:'CREATE',mode:state.mode,name});}else{const code=($('#roomCode')?.value||pendingRoom||'').trim();if(!/^\d{5}$/.test(code)){toast('Введи код из 5 цифр');return;}send({type:'JOIN',code,name});}return;
  }
  if(a==='start-room'){send({type:'START',botCount:Number($('#roomBots')?.value??state.roomBots??0)});return;}
  if(a==='copy-link'){copyInvite();return;}
