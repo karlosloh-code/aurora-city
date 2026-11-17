@@ -1,11 +1,11 @@
 (function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;root.AuroraEngine=api;})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 const MODES={
- classic:{label:'Обычная',icon:'🎩',detail:'2 кубика · свободные улицы · классическая партия',min:2,max:5,cash:15000,salary:2000,three:false},
- fast:{label:'Быстрая игра',icon:'⚡',detail:'3-й особый кубик · быстрый старт · больше событий',min:2,max:5,cash:17500,salary:2000,three:true},
- retro:{label:'Ретро',icon:'📼',detail:'2 кубика · старт 15 000k · старые темпы игры',min:2,max:5,cash:15000,salary:1500,three:false},
- layout:{label:'Расклад',icon:'🃏',detail:'3 игрока · каждому случайный бюджет · улицы розданы',min:3,max:3,cash:15000,salary:2000,three:true},
- shuffle:{label:'Перестановка 3',icon:'🔀',detail:'3 игрока · старт 25 000k · случайный порядок клеток',min:3,max:3,cash:25000,salary:2000,three:true}
+ classic:{label:'Обычная',icon:'🎩',detail:'2 кубика · свободные улицы · классическая партия',min:2,max:5,cash:15000,salary:2000,three:false,mortgageRounds:15},
+ fast:{label:'Быстрая игра',icon:'⚡',detail:'3-й особый кубик · быстрый старт · больше событий',min:2,max:5,cash:17500,salary:2000,three:true,mortgageRounds:null},
+ retro:{label:'Ретро',icon:'📼',detail:'2 кубика · старт 15 000k · старые темпы игры',min:2,max:5,cash:15000,salary:1500,three:false,mortgageRounds:null},
+ layout:{label:'Расклад',icon:'🃏',detail:'3 игрока · каждому случайный бюджет · улицы розданы',min:3,max:3,cash:15000,salary:2000,three:true,mortgageRounds:null},
+ shuffle:{label:'Перестановка 3',icon:'🔀',detail:'3 игрока · старт 25 000k · случайный порядок клеток',min:3,max:3,cash:25000,salary:2000,three:true,mortgageRounds:7}
 };
 const defs=[
 ['Старт',0,'start','🚀'],['Шанс',0,'chance','❔'],['American Airlines',2200,'air','✈️'],['Банковская премия',0,'bonus','💵'],['Taxi Max',2600,'transport','🚕'],['Шанс',0,'chance','❔'],['Chanel',600,'fashion','✿'],['Hugo Boss',600,'fashion','♛'],['Lufthansa',2200,'air','🛫'],['Шанс',0,'chance','❔'],['Сладкий приз',0,'bonus','🍩'],
@@ -17,7 +17,7 @@ const COLORS={air:'#89c46e',transport:'#4cc9ee',fashion:'#f47ab9',tech:'#a6a9b0'
 const BUFFS=[{value:2.5,rarity:'Обычная',weight:37},{value:10,rarity:'Редкая',weight:28},{value:20,rarity:'Эпическая',weight:19},{value:33,rarity:'Легендарная',weight:11},{value:50,rarity:'Мифическая',weight:5}];
 const coins=n=>`${Math.round(n||0).toLocaleString('ru-RU')}k`;
 const rnd=n=>Math.floor(Math.random()*n);
-const allDefs=()=>defs.map((a,i)=>({id:i,name:a[0],price:a[1],type:a[2],symbol:a[3],color:COLORS[a[2]]||'#9ea3bb',ownerId:null,level:0,buffs:[],mortgage:false}));
+const allDefs=()=>defs.map((a,i)=>({id:i,name:a[0],price:a[1],type:a[2],symbol:a[3],color:COLORS[a[2]]||'#9ea3bb',ownerId:null,level:0,buffs:[],mortgage:false,mortgageDueRound:null}));
 const shuffle=a=>{for(let i=a.length-1;i>0;i--){let j=rnd(i+1);[a[i],a[j]]=[a[j],a[i]];}return a;};
 function log(g,kind,message,extra={}){g.seq++;g.events.push({seq:g.seq,kind,message,...extra});if(g.events.length>100)g.events.shift();}
 function create(people,mode='classic'){
@@ -29,7 +29,7 @@ function create(people,mode='classic'){
  }
  const layoutBudgets=mode==='layout'?shuffle(Array.from({length:21},(_,i)=>15000+i*500)).slice(0,people.length):null;
  const players=people.map((o,i)=>({id:String(o.id),name:String(o.name||'Игрок '+(i+1)).replace(/[<>]/g,'').slice(0,22),avatar:['🌙','🦊','🐼','🌸','🐱'][i],color:['#ce9dff','#6de5dd','#ffbe89','#f79dce','#ffe078'][i],bot:!!o.bot,cash:layoutBudgets?layoutBudgets[i]:rule.cash,pos:0,cases:1,inventory:[],loans:[],bankrupt:false,turns:0}));
- const g={mode,tiles,players,active:0,phase:'roll',turn:1,seq:0,events:[],lastRoll:null,pendingRoll:null,offer:null,finished:false};
+ const g={mode,tiles,players,active:0,phase:'roll',turn:1,round:1,seq:0,events:[],lastRoll:null,pendingRoll:null,offer:null,finished:false};
  if(mode==='layout'){
   const pool=shuffle(tiles.filter(t=>t.price>0));pool.forEach((t,i)=>{t.ownerId=players[(i%6<3)?i%3:2-i%3].id;});
   log(g,'layout','Все улицы распределены между тремя игроками; стартовый бюджет каждого определён случайно');
@@ -43,10 +43,10 @@ const owned=(g,p)=>g.tiles.filter(t=>t.ownerId===p.id);
 const buildingCost=t=>Math.round(t.price*(.32+t.level*.055));
 const rent=t=>!t.price||t.mortgage?0:Math.round(t.price*([.09,.18,.36,.68,1.1,1.65][t.level]||1.65)*(1+t.buffs.reduce((a,b)=>a+b.value,0)/100));
 function netWorth(g,p){return p.cash+owned(g,p).reduce((s,t)=>s+t.price+Array.from({length:t.level},(_,i)=>buildingCost({...t,level:i})).reduce((a,b)=>a+b,0),0)-p.loans.reduce((s,l)=>s+l.due,0);}
-function release(g,p,creditor){for(const t of owned(g,p)){t.ownerId=creditor?.id||null;t.mortgage=false;t.level=0;t.buffs=[];}p.bankrupt=true;p.cash=0;log(g,'lose',`${p.name} обанкротился`,{playerId:p.id});}
+function release(g,p,creditor){for(const t of owned(g,p)){t.ownerId=creditor?.id||null;t.mortgage=false;t.mortgageDueRound=null;t.level=0;t.buffs=[];}p.bankrupt=true;p.cash=0;log(g,'lose',`${p.name} обанкротился`,{playerId:p.id});}
 function liquidate(g,p,needed){
  const assets=owned(g,p).sort((a,b)=>b.price-a.price);
- for(const t of assets){if(p.cash>=needed)break;const proceeds=Math.round(t.price*.65+Array.from({length:t.level},(_,i)=>buildingCost({...t,level:i})).reduce((a,b)=>a+b,0)*(g.mode==='layout'?.75:1));p.cash+=proceeds;t.ownerId=null;t.level=0;t.buffs=[];t.mortgage=false;log(g,'sell',`${p.name} продал ${t.name}, чтобы покрыть долг (${coins(proceeds)})`,{tile:t.id,playerId:p.id});}
+ for(const t of assets){if(p.cash>=needed)break;const proceeds=Math.round(t.price*.65+Array.from({length:t.level},(_,i)=>buildingCost({...t,level:i})).reduce((a,b)=>a+b,0)*(g.mode==='layout'?.75:1));p.cash+=proceeds;t.ownerId=null;t.level=0;t.buffs=[];t.mortgage=false;t.mortgageDueRound=null;log(g,'sell',`${p.name} продал ${t.name}, чтобы покрыть долг (${coins(proceeds)})`,{tile:t.id,playerId:p.id});}
 }
 function pay(g,p,amount,reason,creditor=null){
  if(amount<=0)return;
@@ -77,9 +77,32 @@ function land(g,p,depth=0){if(depth>2||p.bankrupt)return;const t=g.tiles[p.pos];
 function finalize(g){
  const alive=g.players.filter(x=>!x.bankrupt);if(alive.length===1){g.finished=true;g.phase='finished';log(g,'win',`Победитель — ${alive[0].name}!`,{playerId:alive[0].id});}
 }
+// Each round is one complete cycle of player turns, even when some players are bankrupt.
+function mortgageRemaining(g,t){
+ if(!t.mortgage)return null;
+ const limit=MODES[g.mode].mortgageRounds;
+ if(limit==null)return null;
+ return Math.max(0,(Number.isInteger(t.mortgageDueRound)?t.mortgageDueRound:(g.round||1)+limit)-(g.round||1));
+}
+function expireMortgages(g){
+ const limit=MODES[g.mode].mortgageRounds;
+ if(limit==null)return;
+ for(const t of g.tiles){
+  if(!t.mortgage||!t.ownerId)continue;
+  // Mortgages made before this feature get a fresh full term when an old save resumes.
+  if(!Number.isInteger(t.mortgageDueRound)){t.mortgageDueRound=g.round+limit;continue;}
+  if(g.round<t.mortgageDueRound)continue;
+  const oldOwner=g.players.find(x=>x.id===t.ownerId);
+  t.ownerId=null;t.mortgage=false;t.mortgageDueRound=null;t.level=0;t.buffs=[];
+  log(g,'sell',`${oldOwner?.name||'Игрок'} не выкупил ${t.name} за ${limit} раундов — улица вернулась банку`,{tile:t.id,playerId:oldOwner?.id});
+ }
+}
 function nextPlayer(g){
- let tries=0;do{g.active=(g.active+1)%g.players.length;tries++;}while(current(g).bankrupt&&tries<=g.players.length);
+ if(!Number.isInteger(g.round))g.round=Math.max(1,Math.ceil(g.turn/g.players.length));
+ let wrapped=false;
+ let tries=0;do{g.active=(g.active+1)%g.players.length;if(g.active===0)wrapped=true;tries++;}while(current(g).bankrupt&&tries<=g.players.length);
  if(tries>g.players.length){finalize(g);return;}
+ if(wrapped){g.round++;expireMortgages(g);}
  g.phase='roll';g.pendingRoll=null;g.turn++;const p=current(g);p.turns++;
  for(let i=p.loans.length-1;i>=0;i--){let l=p.loans[i];l.left--;if(l.left<=0){p.loans.splice(i,1);pay(g,p,l.due,'возврат кредита');log(g,'loan',`${p.name}: наступил срок погашения`,{playerId:p.id});if(p.bankrupt)break;}}
  if(p.bankrupt){finalize(g);if(!g.finished)nextPlayer(g);return;}
@@ -119,13 +142,13 @@ function act(g,actorId,type,args={}){
   only();const t=tile();if(t.ownerId!==p.id||t.mortgage||t.level>=5)throw Error('Улучшение недоступно');const cost=buildingCost(t);if(p.cash<cost)throw Error('Не хватает денег');p.cash-=cost;t.level++;log(g,'build',`${p.name} построил ${t.level===5?'небоскрёб':'здание'} на ${t.name} · уровень ${t.level}`,{tile:t.id,playerId:p.id,level:t.level});break;
  }
  case 'MORTGAGE':{
-  only();const t=tile();if(t.ownerId!==p.id||t.mortgage)throw Error('Улицу нельзя заложить');t.mortgage=true;p.cash+=Math.round(t.price*.55);log(g,'money',`${p.name} заложил ${t.name}`,{tile:t.id,playerId:p.id,amount:Math.round(t.price*.55)});break;
+  only();const t=tile();if(t.ownerId!==p.id||t.mortgage)throw Error('Улицу нельзя заложить');t.mortgage=true;t.mortgageDueRound=MODES[g.mode].mortgageRounds==null?null:(g.round||1)+MODES[g.mode].mortgageRounds;p.cash+=Math.round(t.price*.55);log(g,'money',`${p.name} заложил ${t.name}`,{tile:t.id,playerId:p.id,amount:Math.round(t.price*.55)});break;
  }
  case 'UNMORTGAGE':{
-  only();const t=tile(),cost=Math.round(t.price*.65);if(t.ownerId!==p.id||!t.mortgage||p.cash<cost)throw Error('Не удалось выкупить улицу');p.cash-=cost;t.mortgage=false;log(g,'buy',`${p.name} выкупил ${t.name}`,{tile:t.id,playerId:p.id});break;
+  only();const t=tile(),cost=Math.round(t.price*.65);if(t.ownerId!==p.id||!t.mortgage||p.cash<cost)throw Error('Не удалось выкупить улицу');p.cash-=cost;t.mortgage=false;t.mortgageDueRound=null;log(g,'buy',`${p.name} выкупил ${t.name}`,{tile:t.id,playerId:p.id});break;
  }
  case 'SELL':{
-  only();const t=tile();if(t.ownerId!==p.id)throw Error('Улица тебе не принадлежит');const buildValue=Array.from({length:t.level},(_,i)=>buildingCost({...t,level:i})).reduce((a,b)=>a+b,0);const proceeds=Math.round(t.price*.7+buildValue*(g.mode==='layout'?.75:1));t.ownerId=null;t.level=0;t.buffs=[];t.mortgage=false;p.cash+=proceeds;log(g,'sell',`${p.name} продал ${t.name} за ${coins(proceeds)}`,{tile:t.id,playerId:p.id});break;
+  only();const t=tile();if(t.ownerId!==p.id)throw Error('Улица тебе не принадлежит');const buildValue=Array.from({length:t.level},(_,i)=>buildingCost({...t,level:i})).reduce((a,b)=>a+b,0);const proceeds=Math.round(t.price*.7+buildValue*(g.mode==='layout'?.75:1));t.ownerId=null;t.level=0;t.buffs=[];t.mortgage=false;t.mortgageDueRound=null;p.cash+=proceeds;log(g,'sell',`${p.name} продал ${t.name} за ${coins(proceeds)}`,{tile:t.id,playerId:p.id});break;
  }
  case 'LOAN':{
   only();const amount=Number(args.amount);if(![1000,2000,3000].includes(amount))throw Error('Некорректная сумма');const debt=p.loans.reduce((s,x)=>s+x.due,0);if(debt+Math.round(amount*1.15)>7000)throw Error('Лимит кредитов — 7000k с процентами');p.cash+=amount;p.loans.push({amount,due:Math.round(amount*1.15),left:7});log(g,'loan',`${p.name} получил кредит ${coins(amount)} · срок 7 своих ходов`,{amount,playerId:p.id});break;
@@ -163,5 +186,5 @@ function botTurn(g){if(!g||g.finished)return false;const p=current(g);if(!p.bot)
   }
  }catch(e){if(g.phase==='decision')g.phase='end';if(g.phase==='bus')g.phase='end';if(g.phase==='end')nextPlayer(g);}return true;
 }
-return {MODES,defs,COLORS,BUFFS,create,act,botTurn,current,owned,rent,buildingCost,coins,netWorth};
+return {MODES,defs,COLORS,BUFFS,create,act,botTurn,current,owned,rent,buildingCost,coins,netWorth,mortgageRemaining};
 });
